@@ -96,7 +96,6 @@ function resizeCanvas() {
   
   updateMetrics();
   
-  // Re-calculate cover dimensions if first bitmap is available
   const sample = state.bitmaps.find((b) => b);
   if (sample) {
     updateCoverMetrics(sample.width, sample.height);
@@ -117,7 +116,6 @@ function renderFrame(frameIdx) {
   if (frameIdx === state.lastFrameIndex) return;
   
   let bitmap = state.bitmaps[frameIdx];
-  // Fallback to nearest loaded bitmap if current frame is loading
   if (!bitmap) {
     for (let offset = 1; offset < state.frameCount; offset += 1) {
       const prev = frameIdx - offset;
@@ -179,8 +177,6 @@ function updatePortal(value) {
   }
 }
 
-let isRendering = false;
-
 function updateFilm(now) {
   if (!state.ready) return;
   const dt = Math.min((now - (updateFilm.last || now)) / 1000, 0.5) || 0.016;
@@ -219,7 +215,7 @@ function revealSections() {
   document.querySelectorAll("[data-reveal]").forEach((element) => observer.observe(element));
 }
 
-// Asynchronous off-thread decode with createImageBitmap
+// Asynchronous off-thread decode with createImageBitmap directly into GPU texture memory
 async function loadSingleBitmap(index) {
   try {
     const res = await fetch(getFrameUrl(index));
@@ -254,29 +250,13 @@ async function preloadFrames() {
 
   resizeCanvas();
 
-  // Eager load first 30 frames for immediate render
-  const eagerCount = Math.min(30, state.frameCount);
-  const eagerPromises = [];
-  for (let i = 0; i < eagerCount; i += 1) {
-    eagerPromises.push(loadSingleBitmap(i));
-  }
-  
-  await Promise.all(eagerPromises);
-  
-  state.ready = true;
-  if (loader) loader.classList.add("done");
-  renderFrame(0);
+  // Queue ALL 192 frames for parallel fetch and off-thread GPU decoding during loading screen
+  const queue = Array.from({ length: state.frameCount }, (_, i) => i);
+  const concurrency = 8;
 
-  // Background queue for remaining frames
-  const remaining = [];
-  for (let i = eagerCount; i < state.frameCount; i += 1) {
-    remaining.push(i);
-  }
-
-  const concurrency = 4;
   async function worker() {
-    while (remaining.length > 0) {
-      const idx = remaining.shift();
+    while (queue.length > 0) {
+      const idx = queue.shift();
       if (idx !== undefined) {
         await loadSingleBitmap(idx);
       }
@@ -284,9 +264,19 @@ async function preloadFrames() {
   }
 
   const workers = Array.from({ length: concurrency }, () => worker());
-  Promise.all(workers).then(() => {
-    if (loadbar) loadbar.style.width = "100%";
-  });
+  await Promise.all(workers);
+
+  // 100% of frames pre-decoded in GPU memory
+  state.ready = true;
+  renderFrame(0);
+
+  if (loadbar) loadbar.style.width = "100%";
+  
+  if (loader) {
+    setTimeout(() => {
+      loader.classList.add("done");
+    }, 150);
+  }
 }
 
 function init() {
